@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BikeCam</string>
+    <string name="notif_channel">Gravação</string>
+    <string name="notif_recording">Gravando pedal</string>
+    <string name="notif_recording_text">Vídeo com telemetria em andamento</string>
+</resources>
