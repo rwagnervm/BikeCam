@@ -11,13 +11,7 @@ altitude, mini-mapa, FC, cadência, distância, velocidade GPS e média):
 
 ![Exemplo de quadro com OSD do BikeCam](docs/exemplo-osd.jpg)
 
-Vídeo de exemplo:
-
-<iframe width="560" height="315" src="https://www.youtube.com/embed/ljy5OcVNnTk?si=dbCykK4y3l7zbB5E" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
-
-▶️ [Assistir no YouTube](https://www.youtube.com/watch?v=ljy5OcVNnTk)
-
-> O GitHub não renderiza `<iframe>` em arquivos Markdown; nele aparece apenas o link acima.
+▶️ [Assistir exemplo no YouTube](https://www.youtube.com/watch?v=ljy5OcVNnTk)
 
 ## Build
 ```bash
