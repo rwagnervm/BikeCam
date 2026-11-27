@@ -31,6 +31,9 @@ class TrackPath internal constructor(private val xy: DoubleArray, val count: Int
     fun x(i: Int): Double = xy[2 * i]
     fun y(i: Int): Double = xy[2 * i + 1]
 
+    /** Os [n] primeiros pontos, sem copiar (ex.: o trecho já percorrido de uma rota conhecida). */
+    fun prefix(n: Int): TrackPath = if (n >= count) this else TrackPath(xy, n.coerceAtLeast(0))
+
     companion object {
         val EMPTY = TrackPath(DoubleArray(0), 0)
     }

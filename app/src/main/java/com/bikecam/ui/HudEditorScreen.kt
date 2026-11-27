@@ -8,7 +8,9 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,6 +47,7 @@ import com.bikecam.AppGraph
 import com.bikecam.hud.HudLayout
 import com.bikecam.hud.HudRenderer
 import com.bikecam.hud.HudWidget
+import com.bikecam.hud.TileSource
 import com.bikecam.recording.RecordingService
 import com.bikecam.settings.AppSettings
 import com.bikecam.settings.MountOrientation
@@ -57,9 +60,9 @@ import java.util.Locale
 private val Amber = Color(0xFFFFC107)
 
 /**
- * Editor do HUD (RF04): arraste um mostrador para movê-lo, toque para selecioná-lo e use −/+ para
- * mudar o tamanho. Cada orientação de montagem tem o seu layout. O resultado aparece igual na
- * tela, no vídeo e na foto carimbada, porque todos usam o mesmo HudRenderer.
+ * Editor do HUD da gravação ao vivo (RF04): arraste um mostrador para movê-lo, toque para
+ * selecioná-lo e use −/+ para mudar o tamanho. Cada orientação de montagem tem o seu layout. O
+ * resultado aparece igual na tela, no vídeo e na foto carimbada, porque todos usam o mesmo HudRenderer.
  */
 @Composable
 fun HudEditorScreen(graph: AppGraph, service: RecordingService?, onBack: () -> Unit) {
@@ -70,33 +73,62 @@ fun HudEditorScreen(graph: AppGraph, service: RecordingService?, onBack: () -> U
         Box(Modifier.fillMaxSize().background(Color.Black))
         return
     }
-    HudEditor(graph, service, s, onBack)
+    val scope = rememberCoroutineScope()
+    val orientation = s.orientation
+    val live by graph.telemetry.snapshot.collectAsStateWithLifecycle()
+    val sample = remember(live) { withSampleValues(live) }
+    LayoutEditor(
+        title = "Editando layout ${orientation.label.lowercase()}",
+        initial = s.hudLayout(orientation),
+        defaultLayout = HudLayout.default(orientation),
+        aspectRatio = if (orientation == MountOrientation.LANDSCAPE) 16f / 9f else 9f / 16f,
+        tiles = graph.tiles,
+        snapshot = sample,
+        widgets = HudWidget.entries.filterNot { it.renderOnly },
+        onSave = { layout -> scope.launch { graph.settings.setHudLayout(orientation, layout); onBack() } },
+        onCancel = onBack,
+        background = { if (service != null && !s.ecoMode) CameraPreview(service) },
+    )
 }
 
+/**
+ * Editor genérico de layout: fundo qualquer (câmera ao vivo ou quadro de vídeo), HUD desenhado por
+ * cima com [snapshot] e só os [widgets] da lista podem ser ligados. [extraButtons] entra na coluna de
+ * botões (ex.: exportar/importar) e recebe o layout atual e um jeito de trocá-lo.
+ */
 @Composable
-private fun HudEditor(graph: AppGraph, service: RecordingService?, settings: AppSettings, onBack: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    val orientation = settings.orientation
-    val landscape = orientation == MountOrientation.LANDSCAPE
-    var layout by remember { mutableStateOf(settings.hudLayout(orientation)) }
+fun LayoutEditor(
+    title: String,
+    initial: HudLayout,
+    defaultLayout: HudLayout,
+    aspectRatio: Float,
+    tiles: TileSource?,
+    snapshot: TelemetrySnapshot,
+    widgets: List<HudWidget>,
+    onSave: (HudLayout) -> Unit,
+    onCancel: () -> Unit,
+    background: @Composable BoxScope.() -> Unit,
+    extraButtons: @Composable ColumnScope.(layout: HudLayout, setLayout: (HudLayout) -> Unit) -> Unit = { _, _ -> },
+) {
+    var layout by remember { mutableStateOf(initial) }
     var selected by remember { mutableStateOf<HudWidget?>(null) }
     var showList by remember { mutableStateOf(false) }
     val bounds = remember { HashMap<HudWidget, RectF>() }
-    val renderer = remember { HudRenderer(graph.tiles) }
-    val live by graph.telemetry.snapshot.collectAsStateWithLifecycle()
-    val sample = remember(live) { withSampleValues(live) }
+    val renderer = remember(tiles) { HudRenderer(tiles) }
+    // Só os mostradores da lista são desenhados/selecionáveis.
+    val drawn = layout.onlyAvailable(widgets.toSet())
 
     fun hit(x: Float, y: Float): HudWidget? =
-        layout.placements.asReversed().firstOrNull { it.enabled && bounds[it.widget]?.contains(x, y) == true }?.widget
+        drawn.placements.asReversed().firstOrNull { it.enabled && bounds[it.widget]?.contains(x, y) == true }?.widget
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         Box(
             Modifier
                 .align(Alignment.Center)
-                .aspectRatio(if (landscape) 16f / 9f else 9f / 16f)
+                .aspectRatio(aspectRatio)
                 .background(Color(0xFF263238)),
         ) {
-            if (service != null && !settings.ecoMode) CameraPreview(service)
+            background()
             Canvas(
                 Modifier
                     .fillMaxSize()
@@ -118,7 +150,7 @@ private fun HudEditor(graph: AppGraph, service: RecordingService?, settings: App
                         }
                     },
             ) {
-                drawIntoCanvas { renderer.draw(it.nativeCanvas, size.width, size.height, sample, layout, bounds) }
+                drawIntoCanvas { renderer.draw(it.nativeCanvas, size.width, size.height, snapshot, drawn, bounds) }
                 selected?.let { bounds[it] }?.let { r ->
                     val m = 3.dp.toPx()
                     drawRect(
@@ -136,18 +168,14 @@ private fun HudEditor(graph: AppGraph, service: RecordingService?, settings: App
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            SmallButton("Salvar", highlighted = true) {
-                scope.launch {
-                    graph.settings.setHudLayout(orientation, layout)
-                    onBack()
-                }
-            }
-            SmallButton("Cancelar", onClick = onBack)
+            SmallButton("Salvar", highlighted = true) { onSave(layout) }
+            SmallButton("Cancelar", onClick = onCancel)
             SmallButton("Mostradores") { showList = true }
             SmallButton("Padrão") {
-                layout = HudLayout.default(orientation)
+                layout = defaultLayout
                 selected = null
             }
+            extraButtons(layout) { layout = it; selected = null }
         }
 
         val sel = selected?.let { layout[it] }
@@ -161,10 +189,7 @@ private fun HudEditor(graph: AppGraph, service: RecordingService?, settings: App
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (sel == null) {
-                Text(
-                    "Editando layout ${orientation.label.lowercase()} · toque num mostrador para selecionar, arraste para mover",
-                    color = Color.White, fontSize = 12.sp,
-                )
+                Text("$title · toque num mostrador para selecionar, arraste para mover", color = Color.White, fontSize = 12.sp)
             } else {
                 Text(sel.widget.label, color = Amber, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 Text(String.format(Locale.US, "%.0f%%", sel.scale * 100), color = Color.White, fontSize = 12.sp)
@@ -185,7 +210,7 @@ private fun HudEditor(graph: AppGraph, service: RecordingService?, settings: App
             title = { Text("Mostradores") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    layout.placements.sortedBy { it.widget.ordinal }.forEach { p ->
+                    layout.placements.filter { it.widget in widgets }.sortedBy { it.widget.ordinal }.forEach { p ->
                         Row(
                             Modifier
                                 .fillMaxWidth()

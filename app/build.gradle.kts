@@ -12,8 +12,11 @@ android {
         applicationId = "com.bikecam"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+        // Só ARM 64 bits: o ONNX Runtime traz código nativo para 4 arquiteturas; esta é a de
+        // praticamente todos os celulares atuais (sem emuladores x86 e aparelhos 32 bits).
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildTypes {
@@ -64,6 +67,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.play.services)
     implementation(libs.nordic.ble)
+    implementation(libs.media3.transformer)
+    implementation(libs.media3.effect)
+    implementation(libs.media3.common)
+    implementation(libs.onnxruntime.android) // roda o MossFormer2 (limpeza de áudio da renderização)
     implementation(libs.garmin.fit)
 
     testImplementation(libs.junit)

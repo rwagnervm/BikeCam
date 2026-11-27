@@ -14,8 +14,16 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraMetadata
+import android.hardware.camera2.CaptureRequest
 import android.util.Range
+import android.util.Size
 import android.view.Surface
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -24,9 +32,11 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.ResolutionInfo
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.lifecycle.awaitInstance
 import androidx.camera.video.FallbackStrategy
@@ -43,6 +53,7 @@ import androidx.lifecycle.LifecycleOwner
 import com.bikecam.hud.TileSource
 import com.bikecam.settings.AppSettings
 import com.bikecam.settings.MountOrientation
+import com.bikecam.settings.Stabilization
 import com.bikecam.settings.VideoQuality
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -54,13 +65,29 @@ import kotlin.math.min
 data class CameraCapabilities(
     val qualities: List<VideoQuality> = emptyList(),
     val frameRates: List<Int> = listOf(30),
+    /** Estabilização eletrônica do vídeo (CONTROL_VIDEO_STABILIZATION_MODE_ON). */
     val stabilization: Boolean = false,
+    /** Modo "prévia estabilizada" (Android 13+), que estabiliza tela e vídeo juntos. */
+    val previewStabilization: Boolean = false,
+    /** A lente principal tem estabilizador óptico (OIS). */
+    val opticalStabilization: Boolean = false,
+    /** Estabilização efetivamente aplicada no último bind (pode cair para VIDEO se a combinação falhar). */
+    val activeStabilization: Stabilization = Stabilization.OFF,
     /** false se o aparelho não aceita foto junto com preview + vídeo na resolução escolhida. */
     val photos: Boolean = true,
+    /** Resolução das fotos e do vídeo no último bind (já "em pé" conforme a montagem), para os ajustes. */
+    val photoSize: Size? = null,
+    val videoSize: Size? = null,
 )
 
 /** Configuração efetivamente aplicada ao CameraX (para saber quando é preciso refazer o bind). */
-private data class BindConfig(val quality: VideoQuality, val fps: Int, val orientation: MountOrientation)
+private data class BindConfig(
+    val quality: VideoQuality,
+    val fps: Int,
+    val orientation: MountOrientation,
+    val stabilization: Stabilization,
+    val photoMaxQuality: Boolean,
+)
 
 /**
  * Pipeline de câmera: Preview (limpo) + VideoCapture (H.264 por hardware via Recorder) com o
@@ -86,9 +113,10 @@ class CameraController(private val context: Context, private val owner: Lifecycl
     val isRecording: Boolean get() = recording != null
 
     /** Faz (ou refaz) o bind se a configuração de vídeo mudou. Não mexe durante a gravação. */
+    @OptIn(ExperimentalCamera2Interop::class)
     suspend fun bind(settings: AppSettings) {
         if (isRecording) return
-        val cfg = BindConfig(settings.quality, settings.fps, settings.orientation)
+        val cfg = BindConfig(settings.quality, settings.fps, settings.orientation, settings.stabilization, settings.photoMaxQuality)
         if (cfg == bound) return
         val p = provider ?: ProcessCameraProvider.awaitInstance(context).also { provider = it }
         val selector = CameraSelector.DEFAULT_BACK_CAMERA
@@ -99,20 +127,35 @@ class CameraController(private val context: Context, private val owner: Lifecycl
         val supported = videoCaps.getSupportedQualities(DynamicRange.SDR)
         val ranges = info.supportedFrameRateRanges
         val fpsOptions = listOf(30, 60).filter { f -> ranges.any { it.upper >= f } }.ifEmpty { listOf(30) }
-        _capabilities.value = CameraCapabilities(
-            qualities = VideoQuality.entries.filter { it.toQuality() in supported },
-            frameRates = fpsOptions,
-            stabilization = videoCaps.isStabilizationSupported,
-        )
+        val eis = videoCaps.isStabilizationSupported
+        val previewEis = Preview.getPreviewCapabilities(info).isStabilizationSupported
+        val ois = Camera2CameraInfo.from(info)
+            .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+            ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+        Log.i(TAG, "estabilização disponível: EIS=$eis, prévia=$previewEis, OIS=$ois")
 
         val rotation = if (cfg.orientation == MountOrientation.LANDSCAPE) Surface.ROTATION_90 else Surface.ROTATION_0
-        val previewUseCase = Preview.Builder()
+        val wantStab = cfg.stabilization != Stabilization.OFF
+
+        // O OIS costuma vir ligado por padrão, mas não é garantido para apps de terceiros: pede explícito.
+        fun <T> Camera2Interop.Extender<T>.ois() {
+            if (ois) {
+                setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    if (wantStab) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF,
+                )
+            }
+        }
+
+        fun previewUseCase(previewStab: Boolean) = Preview.Builder()
             .setResolutionSelector(
                 ResolutionSelector.Builder()
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
                     .build(),
             )
             .setTargetRotation(rotation)
+            .apply { if (previewStab) setPreviewStabilizationEnabled(true) }
+            .also { Camera2Interop.Extender(it).ois() }
             .build()
 
         val recorder = Recorder.Builder()
@@ -126,46 +169,82 @@ class CameraController(private val context: Context, private val owner: Lifecycl
         val videoUseCase = VideoCapture.Builder(recorder)
             .setTargetRotation(rotation)
             .apply { if (fpsRange != null) setTargetFrameRate(fpsRange) }
-            .apply { if (videoCaps.isStabilizationSupported) setVideoStabilizationEnabled(true) }
+            .apply { if (eis) setVideoStabilizationEnabled(wantStab) }
+            .also { Camera2Interop.Extender(it).ois() }
             .build()
 
         val imageUseCase = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setCaptureMode(
+                if (cfg.photoMaxQuality) ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY,
+            )
             .setResolutionSelector(
                 ResolutionSelector.Builder()
+                    // Mesmo enquadramento do vídeo (o HUD é pensado em 16:9), na maior resolução possível.
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                    .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
                     .build(),
             )
             .setTargetRotation(rotation)
-            .setJpegQuality(92)
-            .build()
-
-        fun group(withPhotos: Boolean) = UseCaseGroup.Builder()
-            .addUseCase(previewUseCase)
-            .addUseCase(videoUseCase)
-            .apply { if (withPhotos) addUseCase(imageUseCase) }
-            .addEffect(overlay.effect)
+            .setJpegQuality(PHOTO_JPEG_QUALITY)
+            .also { Camera2Interop.Extender(it).ois() }
             .build()
 
         p.unbindAll()
-        // Nem todo aparelho aceita foto + vídeo + preview juntos em 4K/60: nesse caso grava sem fotos.
-        val photos = try {
-            camera = p.bindToLifecycle(owner, selector, group(withPhotos = true))
-            true
-        } catch (e: IllegalArgumentException) {
-            Log.w(TAG, "combinação com ImageCapture não suportada; fotos desativadas", e)
-            p.unbindAll()
-            camera = p.bindToLifecycle(owner, selector, group(withPhotos = false))
-            false
+        // Tenta a combinação pedida e vai simplificando se o aparelho recusar: primeiro sem a prévia
+        // estabilizada, depois sem fotos (nem todo aparelho aceita foto + vídeo + preview em 4K/60).
+        val previewStabWanted = cfg.stabilization == Stabilization.PREVIEW && previewEis
+        val attempts = listOf(previewStabWanted to true, false to true, false to false).distinct()
+        var chosen: Triple<Preview, Boolean, Boolean>? = null
+        var lastError: Exception? = null
+        for ((previewStab, withPhotos) in attempts) {
+            val pv = previewUseCase(previewStab)
+            val group = UseCaseGroup.Builder()
+                .addUseCase(pv)
+                .addUseCase(videoUseCase)
+                .apply { if (withPhotos) addUseCase(imageUseCase) }
+                .addEffect(overlay.effect)
+                .build()
+            try {
+                camera = p.bindToLifecycle(owner, selector, group)
+                chosen = Triple(pv, previewStab, withPhotos)
+                break
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "combinação recusada (prévia estabilizada=$previewStab, fotos=$withPhotos)", e)
+                lastError = e
+                p.unbindAll()
+            }
         }
-        _capabilities.value = _capabilities.value.copy(photos = photos)
-        preview = previewUseCase
+        val (previewUseCaseBound, previewStab, photos) = chosen ?: throw lastError!!
+        val active = when {
+            !wantStab || (!eis && !ois) -> Stabilization.OFF
+            previewStab -> Stabilization.PREVIEW
+            else -> Stabilization.VIDEO
+        }
+        preview = previewUseCaseBound
         videoCapture = videoUseCase
         imageCapture = if (photos) imageUseCase else null
-        previewUseCase.surfaceProvider = surfaceProvider
+        previewUseCaseBound.surfaceProvider = surfaceProvider
         bound = cfg
-        Log.i(TAG, "câmera configurada: $cfg, fps=$fpsRange, fotos=$photos")
+        _capabilities.value = CameraCapabilities(
+            qualities = VideoQuality.entries.filter { it.toQuality() in supported },
+            frameRates = fpsOptions,
+            stabilization = eis,
+            previewStabilization = previewEis,
+            opticalStabilization = ois,
+            activeStabilization = active,
+            photos = photos,
+            photoSize = imageCapture?.resolutionInfo?.uprightSize(),
+            videoSize = videoUseCase.resolutionInfo?.uprightSize(),
+        )
+        Log.i(
+            TAG,
+            "câmera configurada: $cfg, fps=$fpsRange, estabilização=$active, fotos=$photos " +
+                "(${_capabilities.value.photoSize}), vídeo=${_capabilities.value.videoSize}",
+        )
     }
+
+    private fun ResolutionInfo.uprightSize(): Size =
+        if (rotationDegrees % 180 == 0) resolution else Size(resolution.height, resolution.width)
 
     /** Range com teto == fps e o maior piso possível (fps mais estável). */
     private fun pickRange(ranges: Set<Range<Int>>, fps: Int): Range<Int>? =
@@ -274,7 +353,7 @@ class CameraController(private val context: Context, private val owner: Lifecycl
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, photoValues(name, pending = true))
             ?: error("MediaStore recusou a foto")
         try {
-            resolver.openOutputStream(uri)!!.use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+            resolver.openOutputStream(uri)!!.use { bmp.compress(Bitmap.CompressFormat.JPEG, PHOTO_JPEG_QUALITY, it) }
         } catch (e: Exception) {
             resolver.delete(uri, null, null)
             throw e
@@ -311,6 +390,8 @@ class CameraController(private val context: Context, private val owner: Lifecycl
 
     private companion object {
         const val TAG = "BikeCam.Camera"
-        const val MAX_STAMPED_SIDE = 3840f
+        /** Limite do lado maior da foto carimbada (bitmap ARGB em memória: 4608×2592 ≈ 48 MB). */
+        const val MAX_STAMPED_SIDE = 4608f
+        const val PHOTO_JPEG_QUALITY = 95
     }
 }

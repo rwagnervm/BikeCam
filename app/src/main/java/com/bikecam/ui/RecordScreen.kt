@@ -20,8 +20,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -29,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,11 +74,10 @@ private val EcoText = Color(0xFFE0E0E0)
 fun RecordScreen(
     graph: AppGraph,
     service: RecordingService?,
+    hardwareKeys: HardwareKeys,
     onSetBrightness: (Float?) -> Unit,
     onKeepScreenOn: (Boolean) -> Unit,
-    onOpenSensors: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onOpenHudEditor: () -> Unit,
+    onNavigate: (MenuDestination) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val settings by graph.settings.settings.collectAsStateWithLifecycle(AppSettings())
@@ -83,97 +87,137 @@ fun RecordScreen(
     val layout = remember(settings) { settings.hudLayout() }
     val eco = settings.ecoMode
 
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+
     // Escurece a tela durante a gravação; qualquer toque devolve o brilho por alguns segundos.
+    // Com os botões de volume ligados a tela também não apaga antes de gravar: com ela apagada o
+    // Android não entrega as teclas ao app (e o celular já está preso no guidão).
     var lastTouch by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(recorder.recording, settings.dimWhileRecording, lastTouch) {
-        onKeepScreenOn(recorder.recording)
+    LaunchedEffect(recorder.recording, settings.dimWhileRecording, settings.volumeKeys, lastTouch) {
+        onKeepScreenOn(recorder.recording || settings.volumeKeys)
         onSetBrightness(null)
         if (recorder.recording && settings.dimWhileRecording) {
             delay(DIM_AFTER_MS)
             onSetBrightness(0.01f)
         }
     }
+    DisposableEffect(Unit) {
+        onDispose {
+            onKeepScreenOn(false)
+            onSetBrightness(null)
+        }
+    }
+    LaunchedEffect(recorder.recording) { if (recorder.recording) drawerState.close() }
+
+    // Vol+ inicia/para a gravação e Vol− tira foto, sem precisar ver a tela.
+    val stampedByKey by rememberUpdatedState(settings.volumeDownStamped)
+    DisposableEffect(service, settings.volumeKeys) {
+        hardwareKeys.handler = if (service != null && settings.volumeKeys) {
+            { action ->
+                when (action) {
+                    HardwareAction.TOGGLE_RECORDING -> service.toggleRecording()
+                    HardwareAction.PHOTO -> service.takePhoto(stamped = stampedByKey)
+                }
+            }
+        } else {
+            null
+        }
+        onDispose { hardwareKeys.handler = null }
+    }
     // Modo economia: a câmera continua alimentando o vídeo, mas nada é exibido na tela.
     LaunchedEffect(eco, service) { if (eco) service?.setSurfaceProvider(null) }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        awaitPointerEvent(PointerEventPass.Initial)
-                        lastTouch = SystemClock.elapsedRealtime()
-                    }
-                }
-            },
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = drawerState.isOpen, // abrir só pelo botão: arrastar sem querer é fácil no guidão
+        drawerContent = {
+            RecordMenu(graph, settings, caps) { dest ->
+                scope.launch { drawerState.snapTo(DrawerValue.Closed) }
+                onNavigate(dest)
+            }
+        },
     ) {
-        if (eco) {
-            EcoDisplay(graph, landscape, Modifier.align(Alignment.Center))
-        } else {
-            Box(
-                Modifier
-                    .align(Alignment.Center)
-                    .aspectRatio(if (landscape) 16f / 9f else 9f / 16f),
-            ) {
-                if (service != null) {
-                    CameraPreview(service)
-                } else {
-                    Text(
-                        "Conceda a permissão de câmera para começar",
-                        color = Color.White,
-                        modifier = Modifier.align(Alignment.Center),
-                    )
-                }
-                LiveHud(graph, layout)
-            }
-        }
-
-        Column(Modifier.align(Alignment.TopCenter).padding(top = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            LiveStatusRow(graph)
-            NoticeBanner(service)
-        }
-
-        Column(
-            Modifier.align(Alignment.CenterStart).padding(start = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent(PointerEventPass.Initial)
+                            lastTouch = SystemClock.elapsedRealtime()
+                        }
+                    }
+                },
         ) {
-            RecordButton(recorder, enabled = service != null) {
-                if (recorder.recording) service?.stopRecording() else service?.startRecording()
+            if (eco) {
+                EcoDisplay(graph, landscape, Modifier.align(Alignment.Center))
+            } else {
+                Box(
+                    Modifier
+                        .align(Alignment.Center)
+                        .aspectRatio(if (landscape) 16f / 9f else 9f / 16f),
+                ) {
+                    if (service != null) {
+                        CameraPreview(service)
+                    } else {
+                        Text(
+                            "Conceda a permissão de câmera para começar",
+                            color = Color.White,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+                    }
+                    LiveHud(graph, layout)
+                }
             }
-            SmallButton(if (eco) "ECO ●" else "ECO", highlighted = eco) { scope.launch { graph.settings.setEcoMode(!eco) } }
-            if (!recorder.recording) {
-                SmallButton("Sensores", onClick = onOpenSensors)
-                SmallButton("HUD", onClick = onOpenHudEditor)
-                SmallButton("Ajustes", onClick = onOpenSettings)
-            }
-        }
 
-        if (service != null && caps.photos) {
+            Column(Modifier.align(Alignment.TopCenter).padding(top = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                LiveStatusRow(graph)
+                NoticeBanner(service)
+            }
+
             Column(
-                Modifier.align(Alignment.CenterEnd).padding(end = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                Modifier.align(Alignment.CenterStart).padding(start = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                PhotoButton("FOTO") { service.takePhoto(stamped = false) }
-                PhotoButton("FOTO\n+HUD") { service.takePhoto(stamped = true) }
+                RecordButton(recorder, enabled = service != null) {
+                    if (recorder.recording) service?.stopRecording() else service?.startRecording()
+                }
+                SmallButton(if (eco) "ECO ●" else "ECO", highlighted = eco) { scope.launch { graph.settings.setEcoMode(!eco) } }
             }
-        }
 
-        val message = recorder.error ?: recorder.lastSaved.takeIf { it.isNotEmpty() }?.let { "Salvo: " + it.joinToString(", ") }
-        if (message != null && !recorder.recording) {
-            Text(
-                message,
-                color = if (recorder.error != null) Red else Color.White,
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(12.dp)
-                    .background(Color(0xAA000000), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-            )
+            if (!recorder.recording) {
+                MenuButton(
+                    onClick = { scope.launch { drawerState.open() } },
+                    modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
+                )
+            }
+
+            if (service != null && caps.photos) {
+                Column(
+                    Modifier.align(Alignment.CenterEnd).padding(end = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    PhotoButton("FOTO") { service.takePhoto(stamped = false) }
+                    PhotoButton("FOTO\n+HUD") { service.takePhoto(stamped = true) }
+                }
+            }
+
+            val message = recorder.error ?: recorder.lastSaved.takeIf { it.isNotEmpty() }?.let { "Salvo: " + it.joinToString(", ") }
+            if (message != null && !recorder.recording) {
+                Text(
+                    message,
+                    color = if (recorder.error != null) Red else Color.White,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(12.dp)
+                        .background(Color(0xAA000000), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
         }
     }
 }

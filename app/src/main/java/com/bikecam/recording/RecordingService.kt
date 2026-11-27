@@ -77,6 +77,7 @@ class RecordingService : LifecycleService() {
     private val binder = LocalBinder()
     private val graph by lazy { (application as BikeCamApp).graph }
     private lateinit var camera: CameraController
+    private lateinit var feedback: ActionFeedback
     private var ride: Ride? = null
     @Volatile private var session: SessionRecorder? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -92,12 +93,14 @@ class RecordingService : LifecycleService() {
     override fun onCreate() {
         super.onCreate()
         camera = CameraController(this, this, graph.tiles)
+        feedback = ActionFeedback(this)
         createChannel()
         startSensors()
 
         lifecycleScope.launch {
             graph.settings.settings.collect { s ->
                 settings = s
+                feedback.enabled = s.actionFeedback
                 layout = s.hudLayout(s.orientation)
                 graph.tiles.enabled = s.mapTiles
                 graph.telemetry.simulate = s.simulate
@@ -153,8 +156,14 @@ class RecordingService : LifecycleService() {
         if (!startSegment(r)) {
             ride = null
             _state.value = _state.value.copy(error = "Câmera não está pronta")
+            feedback.error()
             stopForegroundCompat()
         }
+    }
+
+    /** Inicia ou para (botão Vol+). Usa o estado do serviço, não o da tela, para não duplicar. */
+    fun toggleRecording() {
+        if (ride != null) stopRecording() else startRecording()
     }
 
     fun stopRecording() {
@@ -177,6 +186,7 @@ class RecordingService : LifecycleService() {
                 s.startSegment(r.segment, now)
                 session = s
                 acquireWakeLock()
+                if (r.segment == 1) feedback.recordingStarted()
                 _state.value = RecorderState(recording = true, startedAtMs = r.startedAtMs, segment = r.segment)
             }
             is VideoRecordEvent.Finalize -> {
@@ -205,6 +215,7 @@ class RecordingService : LifecycleService() {
         }
         releaseWakeLock()
         stopForegroundCompat()
+        if (videoError != null) feedback.error() else feedback.recordingStopped()
     }
 
     /** Foto durante o passeio, sem interromper o vídeo: limpa ou com o HUD carimbado. */
@@ -213,6 +224,7 @@ class RecordingService : LifecycleService() {
         val hud = layout
         val name = "bikecam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + if (stamped) "_hud" else ""
         val done = { ok: Boolean ->
+            if (ok) feedback.photoSaved() else feedback.error()
             _notice.value = when {
                 !ok -> Notice("Não foi possível salvar a foto", isError = true)
                 stamped -> Notice("Foto com HUD salva")
@@ -297,6 +309,7 @@ class RecordingService : LifecycleService() {
         ride = null
         session = null
         camera.release()
+        feedback.release()
         releaseWakeLock()
         graph.telemetry.stop()
         graph.location.stop()

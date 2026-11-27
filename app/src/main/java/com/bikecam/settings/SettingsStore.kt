@@ -18,6 +18,13 @@ enum class VideoQuality(val label: String) { SD("480p"), HD("720p"), FHD("1080p"
 /** Como o celular está preso no guidão. */
 enum class MountOrientation(val label: String) { PORTRAIT("Retrato"), LANDSCAPE("Paisagem") }
 
+/**
+ * Estabilização da câmera. [VIDEO] = estabilização eletrônica (EIS) só no arquivo gravado;
+ * [PREVIEW] = modo "prévia estabilizada" do Android 13+, que estabiliza a tela e o vídeo juntos.
+ * Em ambos o estabilizador óptico (OIS) fica ligado quando a lente tem.
+ */
+enum class Stabilization(val label: String) { OFF("Desligada"), VIDEO("Vídeo (EIS)"), PREVIEW("Vídeo + prévia") }
+
 data class PairedSensor(val address: String, val name: String, val type: SensorType) {
     fun encode() = "${type.name}|$address|$name"
 
@@ -46,12 +53,27 @@ data class AppSettings(
     val mapTiles: Boolean = true,
     /** Divide o vídeo em arquivos de N minutos (0 = um arquivo só). */
     val segmentMinutes: Int = 0,
+    val stabilization: Stabilization = Stabilization.VIDEO,
+    /** Fotos com o modo de máxima qualidade da câmera (um pouco mais lento para disparar). */
+    val photoMaxQuality: Boolean = true,
+    /** Vol+ inicia/para a gravação e Vol− tira foto, na tela de gravação. */
+    val volumeKeys: Boolean = true,
+    /** A foto do Vol− leva o HUD carimbado (senão, foto limpa). */
+    val volumeDownStamped: Boolean = true,
+    /** Vibração e som ao iniciar/parar a gravação e ao salvar fotos (tela não visível no guidão). */
+    val actionFeedback: Boolean = true,
     private val hudLandscape: String? = null,
     private val hudPortrait: String? = null,
+    private val renderLandscape: String? = null,
+    private val renderPortrait: String? = null,
 ) {
     /** Layout do HUD salvo para a orientação (ou o padrão). */
     fun hudLayout(o: MountOrientation = orientation): HudLayout =
         HudLayout.decode(if (o == MountOrientation.LANDSCAPE) hudLandscape else hudPortrait, o)
+
+    /** Layout da renderização de vídeo externo, separado do da gravação ao vivo. */
+    fun renderLayout(o: MountOrientation): HudLayout =
+        HudLayout.decode(if (o == MountOrientation.LANDSCAPE) renderLandscape else renderPortrait, HudLayout.defaultRender(o))
 
     companion object {
         val SEGMENT_OPTIONS = listOf(0, 5, 10, 15, 30)
@@ -73,8 +95,15 @@ class SettingsStore(private val context: Context) {
         val ECO = booleanPreferencesKey("eco")
         val MAP_TILES = booleanPreferencesKey("map_tiles")
         val SEGMENT_MIN = intPreferencesKey("segment_min")
+        val STABILIZATION = stringPreferencesKey("stabilization")
+        val PHOTO_MAX_QUALITY = booleanPreferencesKey("photo_max_quality")
+        val VOLUME_KEYS = booleanPreferencesKey("volume_keys")
+        val VOLUME_DOWN_STAMPED = booleanPreferencesKey("volume_down_stamped")
+        val FEEDBACK = booleanPreferencesKey("action_feedback")
         val HUD_LANDSCAPE = stringPreferencesKey("hud_landscape")
         val HUD_PORTRAIT = stringPreferencesKey("hud_portrait")
+        val RENDER_LANDSCAPE = stringPreferencesKey("render_landscape")
+        val RENDER_PORTRAIT = stringPreferencesKey("render_portrait")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { it.toSettings() }
@@ -93,8 +122,15 @@ class SettingsStore(private val context: Context) {
             ecoMode = this[K.ECO] ?: d.ecoMode,
             mapTiles = this[K.MAP_TILES] ?: d.mapTiles,
             segmentMinutes = this[K.SEGMENT_MIN] ?: d.segmentMinutes,
+            stabilization = this[K.STABILIZATION]?.let { runCatching { Stabilization.valueOf(it) }.getOrNull() } ?: d.stabilization,
+            photoMaxQuality = this[K.PHOTO_MAX_QUALITY] ?: d.photoMaxQuality,
+            volumeKeys = this[K.VOLUME_KEYS] ?: d.volumeKeys,
+            volumeDownStamped = this[K.VOLUME_DOWN_STAMPED] ?: d.volumeDownStamped,
+            actionFeedback = this[K.FEEDBACK] ?: d.actionFeedback,
             hudLandscape = this[K.HUD_LANDSCAPE],
             hudPortrait = this[K.HUD_PORTRAIT],
+            renderLandscape = this[K.RENDER_LANDSCAPE],
+            renderPortrait = this[K.RENDER_PORTRAIT],
         )
     }
 
@@ -108,10 +144,21 @@ class SettingsStore(private val context: Context) {
     suspend fun setEcoMode(on: Boolean) = context.dataStore.edit { it[K.ECO] = on }
     suspend fun setMapTiles(on: Boolean) = context.dataStore.edit { it[K.MAP_TILES] = on }
     suspend fun setSegmentMinutes(min: Int) = context.dataStore.edit { it[K.SEGMENT_MIN] = min.coerceIn(0, 120) }
+    suspend fun setStabilization(m: Stabilization) = context.dataStore.edit { it[K.STABILIZATION] = m.name }
+    suspend fun setPhotoMaxQuality(on: Boolean) = context.dataStore.edit { it[K.PHOTO_MAX_QUALITY] = on }
+    suspend fun setVolumeKeys(on: Boolean) = context.dataStore.edit { it[K.VOLUME_KEYS] = on }
+    suspend fun setVolumeDownStamped(on: Boolean) = context.dataStore.edit { it[K.VOLUME_DOWN_STAMPED] = on }
+    suspend fun setActionFeedback(on: Boolean) = context.dataStore.edit { it[K.FEEDBACK] = on }
 
     /** null volta ao layout padrão da orientação. */
     suspend fun setHudLayout(o: MountOrientation, layout: HudLayout?) = context.dataStore.edit {
         val key = if (o == MountOrientation.LANDSCAPE) K.HUD_LANDSCAPE else K.HUD_PORTRAIT
+        if (layout == null) it.remove(key) else it[key] = layout.encode()
+    }
+
+    /** null volta ao layout padrão de renderização da orientação. */
+    suspend fun setRenderLayout(o: MountOrientation, layout: HudLayout?) = context.dataStore.edit {
+        val key = if (o == MountOrientation.LANDSCAPE) K.RENDER_LANDSCAPE else K.RENDER_PORTRAIT
         if (layout == null) it.remove(key) else it[key] = layout.encode()
     }
 

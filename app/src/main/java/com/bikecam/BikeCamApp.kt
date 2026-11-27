@@ -2,6 +2,8 @@ package com.bikecam
 
 import android.app.Application
 import com.bikecam.hud.OsmTileCache
+import com.bikecam.render.RenderJobs
+import com.bikecam.render.RenderSession
 import com.bikecam.settings.SettingsStore
 import com.bikecam.telemetry.TelemetryRepository
 import com.bikecam.telemetry.ble.BleSensorManager
@@ -22,6 +24,8 @@ class AppGraph(app: Application) {
     val ble = BleSensorManager(app, scope)
     val telemetry = TelemetryRepository(location, heading, ble, elevation)
     val tiles = OsmTileCache(app)
+    val render = RenderSession(app, tiles)
+    val renderJobs = RenderJobs()
 }
 
 class BikeCamApp : Application() {

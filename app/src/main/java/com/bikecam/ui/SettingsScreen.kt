@@ -30,6 +30,7 @@ import com.bikecam.recording.CameraCapabilities
 import com.bikecam.recording.RecordingService
 import com.bikecam.settings.AppSettings
 import com.bikecam.settings.MountOrientation
+import com.bikecam.settings.Stabilization
 import com.bikecam.settings.VideoQuality
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -69,13 +70,49 @@ fun SettingsScreen(graph: AppGraph, service: RecordingService?, onBack: () -> Un
                 FilterChip(selected = s.fps == f, onClick = { scope.launch { st.setFps(f) } }, label = { Text("$f fps") })
             }
         }
-        if (caps.stabilization) Text("Estabilização de vídeo ativada.", style = MaterialTheme.typography.bodySmall)
-        if (!caps.photos) {
-            Text(
-                "Este aparelho não grava vídeo e tira foto ao mesmo tempo nesta resolução/fps; os botões de foto ficam ocultos.",
-                style = MaterialTheme.typography.bodySmall,
-            )
+
+        SectionTitle("Estabilização")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Stabilization.entries.forEach { m ->
+                val available = when (m) {
+                    Stabilization.OFF -> true
+                    Stabilization.VIDEO -> caps.stabilization || caps.opticalStabilization
+                    Stabilization.PREVIEW -> caps.previewStabilization
+                }
+                FilterChip(
+                    selected = s.stabilization == m,
+                    enabled = available,
+                    onClick = { scope.launch { st.setStabilization(m) } },
+                    label = { Text(m.label) },
+                )
+            }
         }
+        Text(
+            "Neste aparelho: óptica (OIS) ${yesNo(caps.opticalStabilization)} · eletrônica (EIS) ${yesNo(caps.stabilization)} · " +
+                "prévia estabilizada ${yesNo(caps.previewStabilization)}. Em uso: ${caps.activeStabilization.label}.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            "A eletrônica corta um pouco as bordas do quadro. \"Vídeo + prévia\" estabiliza também a tela e, em alguns " +
+                "aparelhos, é mais forte; vale comparar os dois num mesmo trecho. Vibração fina (trepidação do guidão) só " +
+                "some com um suporte com amortecimento; 60 fps também ajuda a deixar o vídeo mais nítido.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+
+        SectionTitle("Fotos")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = s.photoMaxQuality, onClick = { scope.launch { st.setPhotoMaxQuality(true) } }, label = { Text("Máxima qualidade") })
+            FilterChip(selected = !s.photoMaxQuality, onClick = { scope.launch { st.setPhotoMaxQuality(false) } }, label = { Text("Disparo rápido") })
+        }
+        Text(
+            if (!caps.photos) {
+                "Este aparelho não grava vídeo e tira foto ao mesmo tempo nesta resolução/fps; as fotos ficam desativadas."
+            } else {
+                (caps.photoSize?.let { "Resolução das fotos: ${it.width}×${it.height} (16:9, a maior disponível junto com o vídeo). " } ?: "") +
+                    "\"Máxima qualidade\" usa o processamento completo da câmera; \"Disparo rápido\" captura mais perto do instante do toque."
+            },
+            style = MaterialTheme.typography.bodySmall,
+        )
         Text(
             "Codec: H.264. O CameraX não permite escolher H.265 para vídeo SDR com o OSD; reduza a resolução para economizar espaço.",
             style = MaterialTheme.typography.bodySmall,
@@ -127,6 +164,22 @@ fun SettingsScreen(graph: AppGraph, service: RecordingService?, onBack: () -> Un
             style = MaterialTheme.typography.bodySmall,
         )
 
+        SectionTitle("Controles sem tocar na tela")
+        SwitchRow("Botões de volume: Vol+ grava/para, Vol− foto", s.volumeKeys) { scope.launch { st.setVolumeKeys(it) } }
+        if (s.volumeKeys) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = s.volumeDownStamped, onClick = { scope.launch { st.setVolumeDownStamped(true) } }, label = { Text("Vol−: foto com HUD") })
+                FilterChip(selected = !s.volumeDownStamped, onClick = { scope.launch { st.setVolumeDownStamped(false) } }, label = { Text("Vol−: foto limpa") })
+            }
+        }
+        SwitchRow("Vibração e som de confirmação", s.actionFeedback) { scope.launch { st.setActionFeedback(it) } }
+        Text(
+            "Funciona na tela de gravação, com o app aberto (a tela fica acesa, e escurece durante a gravação). " +
+                "Controles remotos Bluetooth de selfie também servem: eles enviam \"volume +\". Confirmação: 1 vibração " +
+                "longa = gravando; 2 curtas = parou; 1 curta = foto salva; 3 curtas = erro.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+
         SectionTitle("Gravação")
         SwitchRow("Gravar áudio", s.recordAudio) { scope.launch { st.setRecordAudio(it) } }
         SwitchRow("Modo economia (tela preta, só números)", s.ecoMode) { scope.launch { st.setEcoMode(it) } }
@@ -142,9 +195,11 @@ fun SettingsScreen(graph: AppGraph, service: RecordingService?, onBack: () -> Un
 }
 
 @Composable
-private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+internal fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onChange)
     }
 }
+
+private fun yesNo(b: Boolean) = if (b) "sim" else "não"

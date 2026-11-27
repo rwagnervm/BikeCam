@@ -65,6 +65,15 @@ class HudRenderer(private val tiles: TileSource? = null) {
         color = Color.argb(190, 0, 0, 0)
     }
     private val trackPaint = Paint(trackOutlinePaint).apply { color = Color.rgb(255, 152, 0) }
+    private val routeOutlinePaint = Paint(trackOutlinePaint).apply { color = Color.argb(120, 0, 0, 0) }
+    private val routePaint = Paint(trackOutlinePaint).apply { color = Color.argb(200, 176, 190, 197) }
+    private val profileFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(70, 255, 255, 255) }
+    private val profileDonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(150, 255, 152, 0) }
+    private val profileLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeJoin = Paint.Join.ROUND
+        color = Color.argb(220, 255, 255, 255)
+    }
     private val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(229, 57, 53) }
     private val markerStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -120,12 +129,17 @@ class HudRenderer(private val tiles: TileSource? = null) {
                     valueBox(canvas, width, height, u, p, "HORA", clockFormat.format(date), "")
                 }
                 HudWidget.MAP -> miniMap(canvas, width, height, u, p, s)
+                HudWidget.POWER -> valueBox(canvas, width, height, u, p, "POTÊNCIA",
+                    s.powerW?.toString() ?: "--", "W")
+                HudWidget.TEMPERATURE -> valueBox(canvas, width, height, u, p, "TEMP.",
+                    s.temperatureC?.let { String.format(Locale.US, "%.0f", it) } ?: "--", "°C")
+                HudWidget.ELEVATION_PROFILE -> elevationProfile(canvas, width, height, u, p, s)
             }
             bounds?.put(p.widget, RectF(rect))
         }
     }
 
-    private fun sourceTag(src: SpeedSource) = if (src == SpeedSource.NONE) null else src.tag
+    private fun sourceTag(src: SpeedSource) = src.tag.takeIf { src != SpeedSource.NONE && it.isNotEmpty() }
 
     private fun fmt1(v: Float) = String.format(Locale.US, "%.1f", v)
 
@@ -191,7 +205,10 @@ class HudRenderer(private val tiles: TileSource? = null) {
             clipPath.addRoundRect(rect, radius, radius, Path.Direction.CW)
             c.clipPath(clipPath)
             drewTiles = drawTiles(c, cx, cy, unitsPerPx, cxPx, cyPx)
-            drawTrack(c, s.track, cx, cy, unitsPerPx, cxPx, cyPx, k)
+            if (s.route.count > 1) {
+                drawPolyline(c, s.route, cx, cy, unitsPerPx, cxPx, cyPx, k, routeOutlinePaint, routePaint, linkToCenter = false)
+            }
+            drawPolyline(c, s.track, cx, cy, unitsPerPx, cxPx, cyPx, k, trackOutlinePaint, trackPaint, linkToCenter = true)
             c.restore()
             drawMarker(c, cxPx, cyPx, k, s.headingDeg)
         } else {
@@ -274,8 +291,10 @@ class HudRenderer(private val tiles: TileSource? = null) {
         return false
     }
 
-    private fun drawTrack(
+    /** Linha de uma trilha; [linkToCenter] liga o último ponto à posição atual (centro do mapa). */
+    private fun drawPolyline(
         c: Canvas, track: TrackPath, cx: Double, cy: Double, unitsPerPx: Double, cxPx: Float, cyPx: Float, k: Float,
+        outline: Paint, line: Paint, linkToCenter: Boolean,
     ) {
         if (track.count == 0) return
         path.reset()
@@ -294,11 +313,74 @@ class HudRenderer(private val tiles: TileSource? = null) {
             lastX = x
             lastY = y
         }
-        path.lineTo(cxPx, cyPx) // liga o último ponto gravado à posição atual
-        trackOutlinePaint.strokeWidth = 1.3f * k
-        trackPaint.strokeWidth = 0.7f * k
-        c.drawPath(path, trackOutlinePaint)
-        c.drawPath(path, trackPaint)
+        if (linkToCenter) path.lineTo(cxPx, cyPx) // liga o último ponto gravado à posição atual
+        outline.strokeWidth = 1.3f * k
+        line.strokeWidth = 0.7f * k
+        c.drawPath(path, outline)
+        c.drawPath(path, line)
+    }
+
+    /**
+     * Perfil de elevação da rota inteira: área clara, trecho já percorrido em laranja e um ponto na
+     * posição atual.
+     */
+    private fun elevationProfile(c: Canvas, w: Float, h: Float, u: Float, p: WidgetPlacement, s: TelemetrySnapshot) {
+        val k = u * p.scale
+        val boxW = PROFILE_W_U * k
+        val boxH = PROFILE_H_U * k
+        val (left, top) = place(w, h, u, p, boxW, boxH)
+        rect.set(left, top, left + boxW, top + boxH)
+        c.drawRoundRect(rect, 1.5f * k, 1.5f * k, boxPaint)
+        labelPaint.textSize = 2.4f * k
+        val pad = 1.4f * k
+        c.drawText("ELEVAÇÃO", left + pad, top + pad + labelPaint.textSize * 0.8f, labelPaint)
+        val prof = s.elevationProfile
+        if (prof == null) {
+            unitPaint.textSize = 2.6f * k
+            c.drawText("sem dados", left + pad, top + boxH - pad, unitPaint)
+            return
+        }
+        val range = maxOf(prof.maxAltitudeM - prof.minAltitudeM, MIN_PROFILE_RANGE_M)
+        unitPaint.textSize = 2f * k
+        val rangeText = String.format(Locale.US, "%.0f–%.0f m", prof.minAltitudeM, prof.minAltitudeM + range)
+        c.drawText(rangeText, left + boxW - pad - unitPaint.measureText(rangeText), top + pad + labelPaint.textSize * 0.8f, unitPaint)
+
+        val cl = left + pad
+        val cr = left + boxW - pad
+        val ct = top + pad + labelPaint.textSize + 0.8f * k
+        val cb = top + boxH - pad
+        fun px(i: Int) = cl + (cr - cl) * i / (prof.size - 1)
+        fun py(alt: Float) = cb - (alt - prof.minAltitudeM) / range * (cb - ct)
+
+        path.reset()
+        path.moveTo(cl, cb)
+        for (i in 0 until prof.size) path.lineTo(px(i), py(prof.altitude(i)))
+        path.lineTo(cr, cb)
+        path.close()
+        c.drawPath(path, profileFillPaint)
+
+        val f = prof.fraction(s.distanceM)
+        val mx = cl + (cr - cl) * f
+        c.save()
+        c.clipRect(cl, ct - k, mx, cb)
+        c.drawPath(path, profileDonePaint)
+        c.restore()
+
+        path.reset()
+        for (i in 0 until prof.size) {
+            if (i == 0) path.moveTo(px(i), py(prof.altitude(i))) else path.lineTo(px(i), py(prof.altitude(i)))
+        }
+        profileLinePaint.strokeWidth = 0.3f * k
+        c.drawPath(path, profileLinePaint)
+
+        val fi = f * (prof.size - 1)
+        val i0 = fi.toInt().coerceIn(0, prof.size - 1)
+        val i1 = (i0 + 1).coerceAtMost(prof.size - 1)
+        val alt = prof.altitude(i0) + (prof.altitude(i1) - prof.altitude(i0)) * (fi - i0)
+        val my = py(alt)
+        markerStrokePaint.strokeWidth = 0.35f * k
+        c.drawCircle(mx, my, 1.1f * k, markerPaint)
+        c.drawCircle(mx, my, 1.1f * k, markerStrokePaint)
     }
 
     private fun drawMarker(c: Canvas, x: Float, y: Float, k: Float, heading: Float?) {
@@ -339,5 +421,10 @@ class HudRenderer(private val tiles: TileSource? = null) {
         const val MAX_ZOOM = 18
         /** Até quantos níveis de zoom acima procurar um tile para cobrir um que falta. */
         const val MAX_PARENT_LEVELS = 3
+        /** Tamanho do perfil de elevação, em unidades (antes da escala). */
+        const val PROFILE_W_U = 46f
+        const val PROFILE_H_U = 14f
+        /** Rota quase plana não vira montanha: o eixo mostra pelo menos isto de desnível. */
+        const val MIN_PROFILE_RANGE_M = 20f
     }
 }

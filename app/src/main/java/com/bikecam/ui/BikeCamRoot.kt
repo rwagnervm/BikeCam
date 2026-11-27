@@ -12,7 +12,7 @@ import androidx.compose.ui.graphics.Color
 import com.bikecam.AppGraph
 import com.bikecam.recording.RecordingService
 
-enum class Screen { RECORD, SENSORS, SETTINGS, HUD_EDITOR }
+enum class Screen { RECORD, SENSORS, SETTINGS, HUD_EDITOR, RENDER, RENDER_LAYOUT }
 
 private val Amber = Color(0xFFFFC107)
 
@@ -20,25 +20,40 @@ private val Amber = Color(0xFFFFC107)
 fun BikeCamRoot(
     graph: AppGraph,
     service: RecordingService?,
+    hardwareKeys: HardwareKeys,
     onSetBrightness: (Float?) -> Unit,
     onKeepScreenOn: (Boolean) -> Unit,
 ) {
     var screen by rememberSaveable { mutableStateOf(Screen.RECORD) }
     MaterialTheme(colorScheme = darkColorScheme(primary = Amber, secondary = Amber)) {
-        if (screen != Screen.RECORD) BackHandler { screen = Screen.RECORD }
+        if (screen != Screen.RECORD) {
+            BackHandler { screen = if (screen == Screen.RENDER_LAYOUT) Screen.RENDER else Screen.RECORD }
+        }
         when (screen) {
             Screen.RECORD -> RecordScreen(
                 graph = graph,
                 service = service,
+                hardwareKeys = hardwareKeys,
                 onSetBrightness = onSetBrightness,
                 onKeepScreenOn = onKeepScreenOn,
-                onOpenSensors = { screen = Screen.SENSORS },
-                onOpenSettings = { screen = Screen.SETTINGS },
-                onOpenHudEditor = { screen = Screen.HUD_EDITOR },
+                onNavigate = { dest ->
+                    screen = when (dest) {
+                        MenuDestination.SENSORS -> Screen.SENSORS
+                        MenuDestination.HUD_EDITOR -> Screen.HUD_EDITOR
+                        MenuDestination.RENDER -> Screen.RENDER
+                        MenuDestination.SETTINGS -> Screen.SETTINGS
+                    }
+                },
             )
             Screen.SENSORS -> SensorsScreen(graph = graph, onBack = { screen = Screen.RECORD })
             Screen.SETTINGS -> SettingsScreen(graph = graph, service = service, onBack = { screen = Screen.RECORD })
             Screen.HUD_EDITOR -> HudEditorScreen(graph = graph, service = service, onBack = { screen = Screen.RECORD })
+            Screen.RENDER -> RenderScreen(
+                graph = graph,
+                onBack = { screen = Screen.RECORD },
+                onEditLayout = { screen = Screen.RENDER_LAYOUT },
+            )
+            Screen.RENDER_LAYOUT -> RenderLayoutScreen(graph = graph, onBack = { screen = Screen.RENDER })
         }
     }
 }

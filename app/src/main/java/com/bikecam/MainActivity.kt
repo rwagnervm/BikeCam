@@ -7,6 +7,7 @@ import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.os.IBinder
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -18,6 +19,7 @@ import androidx.lifecycle.lifecycleScope
 import com.bikecam.recording.RecordingService
 import com.bikecam.settings.MountOrientation
 import com.bikecam.ui.BikeCamRoot
+import com.bikecam.ui.HardwareKeys
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -27,6 +29,7 @@ class MainActivity : ComponentActivity() {
     private val graph by lazy { (application as BikeCamApp).graph }
     private var service by mutableStateOf<RecordingService?>(null)
     private var bound = false
+    private val hardwareKeys = HardwareKeys()
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -60,6 +63,7 @@ class MainActivity : ComponentActivity() {
             BikeCamRoot(
                 graph = graph,
                 service = service,
+                hardwareKeys = hardwareKeys,
                 onSetBrightness = ::setBrightness,
                 onKeepScreenOn = ::setKeepScreenOn,
             )
@@ -68,6 +72,13 @@ class MainActivity : ComponentActivity() {
         val missing = Permissions.required().filterNot { Permissions.has(this, it) }
         if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
     }
+
+    /** Vol+/Vol− na tela de gravação (ver [HardwareKeys]); nas demais telas, comportamento normal. */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
+        hardwareKeys.onKeyEvent(event) || super.onKeyDown(keyCode, event)
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
+        hardwareKeys.onKeyEvent(event) || super.onKeyUp(keyCode, event)
 
     private fun setKeepScreenOn(on: Boolean) {
         if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

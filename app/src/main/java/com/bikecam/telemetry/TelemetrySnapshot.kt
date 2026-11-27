@@ -1,9 +1,10 @@
 package com.bikecam.telemetry
 
+import com.bikecam.hud.ElevationProfile
 import com.bikecam.hud.TrackPath
 
 /** De onde veio a velocidade exibida. */
-enum class SpeedSource(val tag: String) { BLE("BLE"), GPS("GPS"), SIMULATED("SIM"), NONE("--") }
+enum class SpeedSource(val tag: String) { BLE("BLE"), GPS("GPS"), SIMULATED("SIM"), FILE(""), NONE("--") }
 
 /**
  * Estado consolidado da telemetria num instante. Imutável: é seguro passar entre threads
@@ -31,6 +32,12 @@ data class TelemetrySnapshot(
     val elevationGainM: Double? = null,
     /** Trilha percorrida desde o início da gravação (para o mini-mapa). */
     val track: TrackPath = TrackPath.EMPTY,
+    /** Rota completa, quando conhecida de antemão (renderização a partir de arquivo). */
+    val route: TrackPath = TrackPath.EMPTY,
+    val powerW: Int? = null,
+    val temperatureC: Float? = null,
+    /** Perfil de elevação da rota inteira (só na renderização a partir de arquivo). */
+    val elevationProfile: ElevationProfile? = null,
     val hrConnected: Boolean = false,
     val cscConnected: Boolean = false,
     val gpsFix: Boolean = false,
